@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Environmental Simulation Studio</title>
+    <meta name="description" content="Sun path, sun hours, solar radiation, sky view, daylight factor, illuminance, climate and comfort studies for architecture and interiors — in the browser." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='7' fill='%23f2a93b'/%3E%3Cg stroke='%23f2a93b' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M16 2v4M16 26v4M2 16h4M26 16h4M6 6l3 3M23 23l3 3M6 26l3-3M23 9l3-3'/%3E%3C/g%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="6.5" fill="var(--sun)" /><g stroke="var(--sun)" stroke-width="2.5" stroke-linecap="round"><path d="M16 2v4M16 26v4M2 16h4M26 16h4M6 6l3 3M23 23l3 3M6 26l3-3M23 9l3-3" /></g></svg>
+          <div>
+            <h1>Environmental Simulation Studio</h1>
+            <p>Sun · Radiation · Daylight · Climate · Comfort</p>
+          </div>
+        </div>
+        <div class="top-actions">
+          <button id="btnClimate" class="btn ghost" title="Open climate & comfort charts">Climate &amp; comfort</button>
+          <button id="btnFit" class="btn ghost" title="Zoom to model">Zoom to fit</button>
+          <button id="btnShot" class="btn ghost" title="Save a PNG of the 3D view">Screenshot</button>
+          <button id="btnTheme" class="btn ghost icon" title="Toggle light / dark theme" aria-label="Toggle theme">◐</button>
+          <button id="btnPanels" class="btn ghost icon only-mobile" aria-label="Show panels">☰</button>
+        </div>
+      </header>
+
+      <aside class="sidebar" id="sidebar">
+        <!-- MODEL -->
+        <details class="section" open>
+          <summary><span class="num">1</span>Model</summary>
+          <div class="body">
+            <label class="drop" id="dropZone">
+              <input type="file" id="fileModel" accept=".obj,.stl,.glb,.gltf,.ply" multiple hidden />
+              <strong>Upload model</strong>
+              <span>Drop or browse — OBJ, GLB/glTF, STL, PLY</span>
+            </label>
+            <div class="row">
+              <label>Units<select id="selUnits">
+                <option value="m">Meters</option><option value="mm">Millimeters</option><option value="cm">Centimeters</option><option value="ft">Feet</option><option value="in">Inches</option>
+              </select></label>
+              <label>Up axis<select id="selUp">
+                <option value="z">Z-up (Rhino, SketchUp, Revit)</option><option value="y">Y-up (glTF, Blender export)</option>
+              </select></label>
+            </div>
+            <label class="check"><input type="checkbox" id="chkRecenter" checked /> Move model to origin</label>
+            <div class="row">
+              <button class="btn" id="btnSample">Load sample site</button>
+              <button class="btn ghost" id="btnClear">Clear</button>
+            </div>
+            <p class="hint">Assign a role to each layer/mesh. <b>Analysis surface</b> gets a sensor grid, <b>Floor</b> gets a work-plane grid, <b>Glazing</b> transmits light, everything else is opaque context. Click a mesh in 3D to find it.</p>
+            <div id="partList" class="parts"></div>
+          </div>
+        </details>
+
+        <!-- LOCATION -->
+        <details class="section" open>
+          <summary><span class="num">2</span>Location &amp; weather</summary>
+          <div class="body">
+            <label>Weather file<select id="selWeather">
+              <option value="sf">San Francisco, USA (TMY3)</option>
+              <option value="chicago">Chicago, USA (TMY3)</option>
+              <option value="custom" disabled>Uploaded EPW</option>
+              <option value="synthetic">Manual location — synthetic clear sky</option>
+            </select></label>
+            <label class="btn ghost file-btn">Upload EPW…<input type="file" id="fileEpw" accept=".epw" hidden /></label>
+            <p class="hint">Get EPW files for any city from <a href="https://climate.onebuilding.org" target="_blank" rel="noopener">climate.onebuilding.org</a> or <a href="https://www.ladybug.tools/epwmap/" target="_blank" rel="noopener">Ladybug EPW map</a>.</p>
+            <div class="row three">
+              <label>Latitude<input type="number" id="inLat" step="0.01" /></label>
+              <label>Longitude<input type="number" id="inLon" step="0.01" /></label>
+              <label>UTC offset<input type="number" id="inTz" step="0.5" /></label>
+            </div>
+            <div class="row">
+              <label>North angle (°)<input type="number" id="inNorth" step="1" value="0" title="Counter-clockwise rotation of north from the model's +Y (Rhino) axis" /></label>
+              <label>Sky clearness<input type="number" id="inClear" step="0.05" min="0.3" max="1.2" value="1" title="Synthetic clear sky only" /></label>
+            </div>
+            <div id="weatherInfo" class="info"></div>
+          </div>
+        </details>
+
+        <!-- SUN -->
+        <details class="section" open>
+          <summary><span class="num">3</span>Sun path &amp; shadows</summary>
+          <div class="body">
+            <div class="row">
+              <label>Month<select id="selMonth"></select></label>
+              <label>Day<input type="number" id="inDay" min="1" max="31" value="21" /></label>
+            </div>
+            <label>Time <output id="outHour"></output><input type="range" id="rngHour" min="0" max="23.75" step="0.25" value="10" /></label>
+            <label>Day of year<input type="range" id="rngDoy" min="0" max="364" step="1" /></label>
+            <div class="row">
+              <button class="btn" id="btnPlay">▶ Animate day</button>
+              <label class="check"><input type="checkbox" id="chkPath" checked /> Sun path</label>
+              <label class="check"><input type="checkbox" id="chkShadow" checked /> Shadows</label>
+            </div>
+            <div id="sunInfo" class="info"></div>
+          </div>
+        </details>
+
+        <!-- ANALYSIS -->
+        <details class="section" open>
+          <summary><span class="num">4</span>Analysis</summary>
+          <div class="body">
+            <label>Study<select id="selType">
+              <option value="sunHours">Direct sun hours</option>
+              <option value="radiation">Incident solar radiation</option>
+              <option value="skyView">Sky view / sky exposure</option>
+              <option value="daylightFactor">Daylight factor (CIE overcast)</option>
+              <option value="illuminance">Point-in-time illuminance</option>
+            </select></label>
+            <p class="hint" id="typeHint"></p>
+            <div class="row">
+              <label>Sensor grid<select id="selGrid">
+                <option value="surfaces">On analysis surfaces</option>
+                <option value="workplane">Work plane over floors</option>
+              </select></label>
+              <label>Grid size (m)<input type="number" id="inGrid" min="0.05" step="0.05" value="1" /></label>
+            </div>
+            <div class="row">
+              <label>Offset (m)<input type="number" id="inOffset" min="0" step="0.01" value="0.05" /></label>
+              <label data-show="workplane">Work plane height (m)<input type="number" id="inWp" min="0" step="0.05" value="0.8" /></label>
+              <label class="check" data-show="surfaces"><input type="checkbox" id="chkFlip" /> Flip normals</label>
+            </div>
+
+            <fieldset data-show="sunHours radiation">
+              <legend>Analysis period</legend>
+              <label>Preset<select id="selPeriod">
+                <option value="year">Full year</option>
+                <option value="mar21">Mar 21 (equinox)</option>
+                <option value="jun21">Jun 21 (summer solstice)</option>
+                <option value="dec21">Dec 21 (winter solstice)</option>
+                <option value="summer">Summer (Jun–Aug)</option>
+                <option value="winter">Winter (Dec–Feb)</option>
+                <option value="custom">Custom</option>
+              </select></label>
+              <div class="row three">
+                <label>From<input type="text" id="inPStart" placeholder="1/1" /></label>
+                <label>To<input type="text" id="inPEnd" placeholder="12/31" /></label>
+                <label>Hours<input type="text" id="inPHours" placeholder="0-23" /></label>
+              </div>
+            </fieldset>
+
+            <fieldset data-show="radiation skyView daylightFactor illuminance">
+              <legend>Sky</legend>
+              <div class="row">
+                <label>Sky density<select id="selMf">
+                  <option value="1">Tregenza · 145 patches</option>
+                  <option value="2">Reinhart · 577 patches</option>
+                </select></label>
+                <label data-show="skyView">Metric<select id="selSkyView">
+                  <option value="exposure">Sky exposure (uniform)</option>
+                  <option value="view">Sky view factor (cosine)</option>
+                </select></label>
+                <label data-show="illuminance">Sky model<select id="selSky">
+                  <option value="auto">From weather (auto)</option>
+                  <option value="clear">CIE clear sky + sun</option>
+                  <option value="overcast">CIE overcast</option>
+                </select></label>
+              </div>
+              <div class="row" data-show="radiation daylightFactor illuminance">
+                <label class="check"><input type="checkbox" id="chkGround" checked /> Include ground reflection</label>
+                <label>Ground reflectance<input type="number" id="inGroundR" min="0" max="1" step="0.05" value="0.2" /></label>
+              </div>
+              <div class="row" data-show="illuminance">
+                <label>Diffuse horiz. (lux)<input type="number" id="inEdh" min="0" step="500" value="10000" /></label>
+                <label>Direct normal (lux)<input type="number" id="inEdn" min="0" step="1000" value="60000" /></label>
+              </div>
+              <label class="check" data-show="illuminance"><input type="checkbox" id="chkIllumWeather" checked /> Use weather-file illuminance at the selected date/time</label>
+            </fieldset>
+
+            <fieldset>
+              <legend>Materials</legend>
+              <div class="row">
+                <label>Glazing transmittance<input type="number" id="inTau" min="0" max="1" step="0.05" value="0.6" /></label>
+                <label class="check"><input type="checkbox" id="chkGlassOpaque" /> Treat glazing as opaque</label>
+              </div>
+              <div class="row" data-show="daylightFactor illuminance">
+                <label>Interior reflections<select id="selBounce">
+                  <option value="0">None (direct only)</option>
+                  <option value="1">1 bounce</option>
+                  <option value="2" selected>Multi-bounce (estimated)</option>
+                </select></label>
+                <label>Surface reflectance<input type="number" id="inRefl" min="0" max="0.95" step="0.05" value="0.5" /></label>
+              </div>
+              <label data-show="daylightFactor illuminance">Bounce rays per sensor<input type="number" id="inRays" min="8" max="512" step="8" value="48" /></label>
+            </fieldset>
+
+            <div class="run">
+              <button class="btn primary" id="btnRun">Run simulation</button>
+              <button class="btn ghost" id="btnCancel" hidden>Cancel</button>
+            </div>
+            <div class="progress" id="progress" hidden><div></div></div>
+            <div id="runInfo" class="info"></div>
+          </div>
+        </details>
+      </aside>
+
+      <main class="viewport" id="viewport">
+        <div class="vp-tools">
+          <label class="check" title="Cut away geometry above a height to look inside rooms"><input type="checkbox" id="chkSection" /> Section cut</label>
+          <input type="range" id="rngSection" min="0" max="10" step="0.05" value="2.4" aria-label="Section cut height" />
+          <output id="outSection"></output>
+          <button class="btn ghost small" id="btnFitResult" title="Zoom to the analysis grid">Zoom to result</button>
+        </div>
+        <div class="vp-overlay" id="vpEmpty" hidden>
+          <p>Load the sample site or upload a model to begin.</p>
+        </div>
+        <div class="legend-overlay" id="legendOverlay" hidden></div>
+      </main>
+
+      <aside class="results" id="resultsPanel">
+        <div class="results-head">
+          <h2>Results</h2>
+          <select id="selHistory" aria-label="Simulation runs"></select>
+        </div>
+        <div id="resultsEmpty" class="empty">Run a simulation to see the results here.</div>
+        <div id="resultsBody" hidden>
+          <div class="stat-grid" id="stats"></div>
+          <h3>Distribution by area</h3>
+          <div id="hist"></div>
+          <h3>Legend</h3>
+          <div class="row">
+            <label>Colors<select id="selPalette"></select></label>
+            <label>Steps<select id="selSegments">
+              <option value="0">Continuous</option><option value="5">5</option><option value="8">8</option><option value="10">10</option><option value="12">12</option>
+            </select></label>
+          </div>
+          <div class="row three">
+            <label>Min<input type="number" id="inLMin" step="any" /></label>
+            <label>Max<input type="number" id="inLMax" step="any" /></label>
+            <label>Threshold<input type="number" id="inThresh" step="any" title="Report % of area at or above this value" /></label>
+          </div>
+          <div class="row">
+            <button class="btn ghost" id="btnAutoRange">Auto range</button>
+            <label class="check"><input type="checkbox" id="chkShowResult" checked /> Show result mesh</label>
+          </div>
+          <h3>Export</h3>
+          <div class="row wrap">
+            <button class="btn ghost" id="btnCsv">CSV</button>
+            <button class="btn ghost" id="btnJson">JSON</button>
+            <button class="btn ghost" id="btnGlb">Colored mesh (GLB)</button>
+            <button class="btn ghost" id="btnPng">Image (PNG)</button>
+          </div>
+          <p class="hint">CSV/JSON contain each sensor's position, normal, area and value — ready for Excel, Python, Grasshopper (via file read) or other visualization tools.</p>
+        </div>
+      </aside>
+
+      <section class="drawer" id="drawer" hidden>
+        <div class="drawer-head">
+          <div class="tabs" role="tablist" id="climateTabs">
+            <button role="tab" data-tab="hourly" aria-selected="true">Hourly plot</button>
+            <button role="tab" data-tab="monthly">Monthly chart</button>
+            <button role="tab" data-tab="wind">Wind rose</button>
+            <button role="tab" data-tab="adaptive">Adaptive comfort</button>
+            <button role="tab" data-tab="pmv">PMV calculator</button>
+          </div>
+          <button class="btn ghost icon" id="btnCloseDrawer" aria-label="Close">✕</button>
+        </div>
+        <div class="drawer-body">
+          <div class="tab-controls" id="climateControls"></div>
+          <div class="tab-content" id="climateContent"></div>
+        </div>
+      </section>
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
