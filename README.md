@@ -9,6 +9,8 @@ explore or export the results.
 Everything runs locally in the browser (Web Worker + BVH ray tracing) — no server and no
 Rhino licence needed.
 
+**Live app:** https://anakipp.github.io/Environmental-Simulation/
+
 ## Quick start
 
 ```bash
@@ -21,6 +23,12 @@ npm test           # unit tests for solar, sky, comfort, weather, grids and the 
 npm run build      # static site in dist/ (deploy anywhere, e.g. GitHub Pages)
 npm run build:single   # one self-contained HTML file in dist-single/
 ```
+
+### Deploying to GitHub Pages
+
+`.github/workflows/deploy-pages.yml` tests, builds and publishes `dist/` on every push to
+`main` (or manually via *Actions → Deploy to GitHub Pages → Run workflow*). One-time setup:
+in the repository's **Settings → Pages**, set **Source** to **GitHub Actions**.
 
 The app opens with a **sample site** (a glazed studio between neighbouring buildings) and the
 San Francisco TMY3 weather file, so every study can be run immediately.
