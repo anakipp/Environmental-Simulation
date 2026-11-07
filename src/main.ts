@@ -18,6 +18,7 @@ import { SimClient } from './sim/client';
 import { JobData, WeightMode, BounceSettings } from './sim/engine';
 import { histogram, fmt, showTip, hideTip } from './ui/charts';
 import { initClimate, refreshClimate } from './ui/climate';
+import { saveFile } from './ui/save';
 
 // ---------------------------------------------------------------- helpers
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -34,15 +35,9 @@ export function toast(msg: string, error = false) {
   toastTimer = window.setTimeout(() => (t.className = 'toast'), error ? 6000 : 3000);
 }
 
-function download(name: string, data: BlobPart, type: string) {
-  const url = URL.createObjectURL(new Blob([data], { type }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+async function download(name: string, data: BlobPart, type: string) {
+  const r = await saveFile(name, new Blob([data], { type }));
+  if (r === 'failed') toast(`Could not save ${name}.`, true);
 }
 
 // ---------------------------------------------------------------- state
@@ -890,12 +885,9 @@ $('btnGlb').onclick = async () => {
     toast(`GLB export failed: ${(e as Error).message}`, true);
   }
 };
-const savePng = () => {
-  const url = viewer.screenshot();
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = state.current ? exportName('png') : 'view.png';
-  a.click();
+const savePng = async () => {
+  const blob = await (await fetch(viewer.screenshot())).blob();
+  download(state.current ? exportName('png') : 'view.png', blob, 'image/png');
 };
 $('btnPng').onclick = savePng;
 $('btnShot').onclick = savePng;
