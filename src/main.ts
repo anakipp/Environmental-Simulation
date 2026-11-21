@@ -1,21 +1,19 @@
 import './styles.css';
 import * as THREE from 'three';
-import { Viewer, Part } from './viewer/viewer';
-import { buildSampleModel } from './viewer/sampleModel';
+import { Viewer } from './viewer/viewer';
+import { loadSampleSite } from './viewer/sampleModel';
+import { loadModelFile, UNIT_SCALE, SUPPORTED_EXTENSIONS } from './viewer/loaders';
+import { ModelEditor } from './model/editor';
+import { ModelPanel, escapeHtml } from './ui/modelPanel';
+import { OptimizerPanel } from './ui/optimizer';
 import {
-  loadModelFile, collectMeshes, meshLabel, guessRole, worldTriangles, concatFloat32,
-  Role, ROLE_LABELS, UNIT_SCALE, SUPPORTED_EXTENSIONS,
-} from './viewer/loaders';
-import {
-  Location, sunPosition, AnalysisPeriod, FULL_YEAR, periodHours, periodSunVectors,
-  MONTH_NAMES, DAYS_IN_MONTH, dayOfYear, monthDayFromDoy, hoyIndex, describePeriod,
+  Location, sunPosition, AnalysisPeriod, FULL_YEAR, MONTH_NAMES, DAYS_IN_MONTH, dayOfYear, monthDayFromDoy, hoyIndex,
 } from './core/solar';
 import { WeatherData, parseEPW, syntheticClearSky } from './core/weather';
-import { cumulativeSky, skyPatches, daylightSkyDirections } from './core/sky';
-import { surfaceGrid, workPlaneGrid, AnalysisGrid } from './core/grid';
+import { AnalysisGrid } from './core/grid';
 import { LegendSettings, PALETTES, colorFor, gradientCss } from './core/colors';
 import { SimClient } from './sim/client';
-import { JobData, WeightMode, BounceSettings } from './sim/engine';
+import { StudyType, STUDY, StudySettings, sceneData, buildGrid, prepareStudy, makeJob, gridStats, Prepared } from './study';
 import { histogram, fmt, showTip, hideTip } from './ui/charts';
 import { initClimate, refreshClimate } from './ui/climate';
 import { saveFile } from './ui/save';
@@ -41,8 +39,6 @@ async function download(name: string, data: BlobPart, type: string) {
 }
 
 // ---------------------------------------------------------------- state
-type StudyType = 'sunHours' | 'radiation' | 'skyView' | 'daylightFactor' | 'illuminance';
-
 interface ResultRecord {
   id: number;
   type: StudyType;
@@ -54,34 +50,9 @@ interface ResultRecord {
   legend: LegendSettings;
   threshold: number;
   lift: number;
+  /** model version the result was computed for */
+  modelVersion: number;
 }
-
-const STUDY: Record<StudyType, { title: string; unit: string; hint: string; grid: 'surfaces' | 'workplane'; threshold: number; palette: string }> = {
-  sunHours: {
-    title: 'Direct sun hours', unit: 'h', grid: 'surfaces', threshold: 2, palette: 'ladybug',
-    hint: 'Hours of direct sun each sensor receives in the period (LB Direct Sun Hours). Use a single day such as Mar 21 for BRE-style "2 hours of sun" checks.',
-  },
-  radiation: {
-    title: 'Incident radiation', unit: 'kWh/m²', grid: 'surfaces', threshold: 800, palette: 'ladybug',
-    hint: 'Cumulative solar energy on surfaces from the weather file\'s sky (LB Incident Radiation): direct + circumsolar + diffuse sky patches, optional ground reflection.',
-  },
-  skyView: {
-    title: 'Sky view', unit: '%', grid: 'surfaces', threshold: 50, palette: 'ladybug',
-    hint: 'Percentage of the sky dome visible from each sensor (LB Sky View). Exposure weighs all patches equally; view factor weighs by cosine.',
-  },
-  daylightFactor: {
-    title: 'Daylight factor', unit: '%', grid: 'workplane', threshold: 2, palette: 'ladybug',
-    hint: 'Interior illuminance as a percentage of the unobstructed exterior under a CIE overcast sky (HB Daylight Factor). Assign floors and glazing first.',
-  },
-  illuminance: {
-    title: 'Illuminance', unit: 'lux', grid: 'workplane', threshold: 300, palette: 'ladybug',
-    hint: 'Point-in-time illuminance at the date/time chosen in "Sun path & shadows" (HB Point-in-Time Grid), using the weather-file sky or manual values.',
-  },
-};
-
-const ROLE_SWATCH: Record<Role, string> = {
-  context: '#d9d6cf', analysis: '#9fb38f', floor: '#c7a77b', glazing: '#6fb3df', ignore: 'transparent',
-};
 
 const state = {
   location: { name: 'San Francisco', latitude: 37.62, longitude: -122.4, timeZone: -8, elevation: 2 } as Location,
@@ -94,13 +65,22 @@ const state = {
   period: { stMonth: 12, stDay: 21, stHour: 0, endMonth: 12, endDay: 21, endHour: 23 } as AnalysisPeriod,
   results: [] as ResultRecord[],
   current: null as ResultRecord | null,
-  selectedPart: null as Part | null,
   running: false,
+  modelVersion: 0,
 };
 
 // ---------------------------------------------------------------- viewer
 const viewer = new Viewer($('viewport'));
 const sim = new SimClient();
+const editor = new ModelEditor(viewer);
+const panel = new ModelPanel(editor, toast);
+editor.onChange = () => {
+  state.modelVersion++;
+  panel.refresh();
+  updateSectionRange();
+  renderStale();
+  $('vpEmpty').hidden = viewer.parts.length > 0;
+};
 
 function applyTheme() {
   const forced = document.documentElement.dataset.theme;
@@ -124,7 +104,7 @@ $('btnTheme').onclick = () => {
 };
 
 // ---------------------------------------------------------------- model
-function addObject(root: THREE.Object3D, opts: { units: string; up: string; recenter: boolean; roles?: Record<string, Role> }) {
+function addObject(root: THREE.Object3D, opts: { units: string; up: string; recenter: boolean }) {
   const s = UNIT_SCALE[opts.units] ?? 1;
   const wrapper = new THREE.Group();
   wrapper.name = root.name;
@@ -139,29 +119,18 @@ function addObject(root: THREE.Object3D, opts: { units: string; up: string; rece
       wrapper.updateMatrixWorld(true);
     }
   }
-  const meshes = collectMeshes(wrapper);
-  if (!meshes.length) throw new Error('No mesh geometry found in the file.');
-  const parts = meshes.map((m, i) => {
-    const name = meshLabel(m, i);
-    const mat = Array.isArray(m.material) ? m.material[0] : m.material;
-    const role = opts.roles?.[name] ?? guessRole(name, mat?.name ?? '');
-    const tris = (m.geometry.index ? m.geometry.index.count : m.geometry.attributes.position.count) / 3;
-    return { name, mesh: m, role, visible: true, triangles: Math.round(tris) };
-  });
-  viewer.addModel(wrapper, parts);
-  renderParts();
-  updateSectionRange();
+  editor.recordAnd(() => editor.importObject(wrapper));
   viewer.fit();
-  $('vpEmpty').hidden = viewer.parts.length > 0;
 }
 
 function loadSample() {
+  panel.select(null);
   viewer.clearModel();
   clearResults();
-  addObject(buildSampleModel(), {
-    units: 'm', up: 'y', recenter: false,
-    roles: { Ground: 'analysis', Studio_Floor: 'floor', Studio_Window_Glass: 'glazing' },
-  });
+  editor.quietly(() => loadSampleSite(editor));
+  editor.clearHistory();
+  editor.refresh();
+  viewer.fit();
 }
 
 async function loadFiles(files: FileList | File[]) {
@@ -176,64 +145,21 @@ async function loadFiles(files: FileList | File[]) {
   }
 }
 
-function renderParts() {
-  const list = $('partList');
-  list.innerHTML = '';
-  for (const p of viewer.parts) {
-    const row = document.createElement('div');
-    row.className = 'part' + (p === state.selectedPart ? ' sel' : '');
-    const vis = document.createElement('input');
-    vis.type = 'checkbox';
-    vis.checked = p.visible;
-    vis.title = 'Show / hide';
-    vis.setAttribute('aria-label', `Show ${p.name}`);
-    vis.onchange = () => {
-      p.visible = vis.checked;
-      viewer.styleMesh(p);
-    };
-    const sw = document.createElement('span');
-    sw.className = 'swatch';
-    sw.style.background = ROLE_SWATCH[p.role];
-    const name = document.createElement('span');
-    name.className = 'name';
-    name.innerHTML = `${escapeHtml(p.name)} <small>${p.triangles.toLocaleString()} tris</small>`;
-    name.title = p.name;
-    name.onclick = () => selectPart(p);
-    const sel = document.createElement('select');
-    sel.setAttribute('aria-label', `Role of ${p.name}`);
-    for (const [k, label] of Object.entries(ROLE_LABELS)) sel.add(new Option(label, k, false, k === p.role));
-    sel.onchange = () => {
-      p.role = sel.value as Role;
-      viewer.styleMesh(p);
-      viewer.updateBounds();
-      renderParts();
-    };
-    row.append(vis, sw, name, sel);
-    list.appendChild(row);
-  }
-}
-
-function selectPart(p: Part | null) {
-  state.selectedPart = p;
-  viewer.highlight(p);
-  renderParts();
-  if (p) {
-    const idx = viewer.parts.indexOf(p);
-    ($('partList').children[idx] as HTMLElement | undefined)?.scrollIntoView({ block: 'nearest' });
-  }
-}
-viewer.onSelectPart = (p) => selectPart(state.selectedPart === p ? null : p);
-
-function escapeHtml(s: string) {
-  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-}
-
 $('btnSample').onclick = loadSample;
 $('btnClear').onclick = () => {
-  viewer.clearModel();
+  editor.record();
+  panel.select(null);
+  for (const p of [...viewer.parts]) viewer.removePart(p);
   clearResults();
-  renderParts();
-  $('vpEmpty').hidden = false;
+  editor.refresh();
+};
+$('btnExportModel').onclick = async () => {
+  if (!viewer.parts.length) return toast('There is no model to export.', true);
+  try {
+    download('model.glb', await viewer.exportGLB({ result: false, model: true }), 'model/gltf-binary');
+  } catch (e) {
+    toast(`Model export failed: ${(e as Error).message}`, true);
+  }
 };
 $<HTMLInputElement>('fileModel').onchange = (e) => {
   const input = e.target as HTMLInputElement;
@@ -379,11 +305,7 @@ for (const id of ['inLat', 'inLon', 'inTz', 'inClear']) {
     if (val('selWeather') === 'synthetic') useSynthetic();
   });
 }
-$('inNorth').addEventListener('change', () => {
-  state.northAngle = num('inNorth') || 0;
-  viewer.setSunPathParams(state.location, state.northAngle);
-  updateSun();
-});
+$('inNorth').addEventListener('change', () => setNorth(num('inNorth') || 0));
 
 // ---------------------------------------------------------------- sun & shadows
 const selMonth = $<HTMLSelectElement>('selMonth');
@@ -530,118 +452,38 @@ $('selType').onchange = () => {
 $('selGrid').onchange = applyVisibility;
 
 // ---------------------------------------------------------------- run simulation
-function sceneData() {
-  const opaque: Float32Array[] = [];
-  const glazing: Float32Array[] = [];
-  for (const p of viewer.parts) {
-    if (p.role === 'ignore') continue;
-    (p.role === 'glazing' ? glazing : opaque).push(worldTriangles(p.mesh));
-  }
-  return { opaque: concatFloat32(opaque), glazing: concatFloat32(glazing) };
+/** Current study settings from the sidebar. */
+function readSettings(): StudySettings {
+  return {
+    type: val('selType') as StudyType,
+    gridKind: val('selGrid') as 'surfaces' | 'workplane',
+    gridSize: Math.max(0.02, num('inGrid') || 1),
+    offset: Math.max(0, num('inOffset') || 0),
+    wpHeight: num('inWp') || 0,
+    flip: checked('chkFlip'),
+    period: readPeriod(),
+    mf: +val('selMf'),
+    skyViewMetric: val('selSkyView') as 'exposure' | 'view',
+    sky: val('selSky') as 'auto' | 'clear' | 'overcast',
+    includeGround: checked('chkGround'),
+    groundReflectance: num('inGroundR'),
+    diffuseHorizontal: num('inEdh'),
+    directNormal: num('inEdn'),
+    illumFromWeather: checked('chkIllumWeather'),
+    tau: num('inTau'),
+    glazingOpaque: checked('chkGlassOpaque'),
+    bounce: +val('selBounce') as 0 | 1 | 2,
+    reflectance: num('inRefl'),
+    rays: num('inRays'),
+    month: state.month,
+    day: state.day,
+    hour: state.hour,
+  };
 }
 
-function buildGrid(kind: string): AnalysisGrid {
-  const size = Math.max(0.02, num('inGrid') || 1);
-  if (kind === 'workplane') {
-    const floors = viewer.parts.filter((p) => p.role === 'floor').map((p) => worldTriangles(p.mesh));
-    if (!floors.length) throw new Error('No floor meshes. Set a mesh\'s role to "Floor → work plane" or switch the sensor grid to "On analysis surfaces".');
-    return workPlaneGrid(concatFloat32(floors), size, num('inWp') || 0);
-  }
-  const surfs = viewer.parts.filter((p) => p.role === 'analysis').map((p) => worldTriangles(p.mesh));
-  if (!surfs.length) throw new Error('No analysis surfaces. Set at least one mesh\'s role to "Analysis surface".');
-  return surfaceGrid(concatFloat32(surfs), size, checked('chkFlip'));
-}
-
-interface Prepared {
-  dirs: Float32Array;
-  weights: Float32Array;
-  mode: WeightMode;
-  scale: number;
-  meta: string;
-  bounce?: BounceSettings;
-}
-
-function packPatches(patches: { dir: [number, number, number] }[], weights: ArrayLike<number>) {
-  const dirs = new Float32Array(patches.length * 3);
-  const w = new Float32Array(patches.length);
-  patches.forEach((p, i) => {
-    dirs.set(p.dir, i * 3);
-    w[i] = weights[i];
-  });
-  return { dirs, weights: w };
-}
-
-function prepare(type: StudyType): Prepared {
-  const w = state.weather;
-  if (!w) throw new Error('Weather data is still loading.');
-  const mf = +val('selMf');
-  const north = state.northAngle;
-  const period = readPeriod();
-  const includeGround = checked('chkGround');
-  const groundR = num('inGroundR');
-
-  if (type === 'sunHours') {
-    const suns = periodSunVectors(state.location, period, north, 0);
-    if (!suns.length) throw new Error('The sun is never above the horizon in this analysis period.');
-    const dirs = new Float32Array(suns.length * 3);
-    suns.forEach((s, i) => dirs.set(s.sun.vector, i * 3));
-    return { dirs, weights: new Float32Array(suns.length).fill(1), mode: 'count', scale: 1, meta: `${describePeriod(period)} · ${suns.length} sun-up hours` };
-  }
-  if (type === 'radiation') {
-    const sky = cumulativeSky(w, { mf, northAngle: north, includeGround, groundReflectance: groundR, hours: periodHours(period) });
-    const all = [...sky.patches, ...sky.ground];
-    const vals = [...sky.values, ...sky.groundValues];
-    return { ...packPatches(all, vals), mode: 'cosine', scale: 1, meta: `${describePeriod(period)} · ${state.weatherLabel} · ${sky.patches.length} sky patches` };
-  }
-  if (type === 'skyView') {
-    const patches = skyPatches(mf, north);
-    const metric = val('selSkyView');
-    const weights = patches.map((p) => (metric === 'view' ? (p.solidAngle / Math.PI) * 100 : (p.solidAngle / (2 * Math.PI)) * 100));
-    return { ...packPatches(patches, weights), mode: metric === 'view' ? 'cosine' : 'uniform', scale: 1, meta: `${metric === 'view' ? 'Sky view factor' : 'Sky exposure'} · ${patches.length} patches` };
-  }
-  // daylight
-  const bounceMode = +val('selBounce');
-  let sky: ReturnType<typeof daylightSkyDirections>;
-  let meta: string;
-  if (type === 'daylightFactor') {
-    sky = daylightSkyDirections({ sky: 'overcast', mf, northAngle: north, diffuseHorizontal: 100, directNormal: 0, groundReflectance: groundR, includeGround });
-    meta = 'CIE overcast sky';
-  } else {
-    const sun = sunPosition(state.location, state.month, state.day, state.hour, north);
-    const hoy = hoyIndex(state.month, state.day, Math.floor(state.hour));
-    let dh = num('inEdh'), dn = num('inEdn');
-    if (checked('chkIllumWeather')) {
-      dh = w.dhIllum[hoy];
-      dn = w.dnIllum[hoy];
-      if (!(dh > 0) && sun.altitude > 0) {
-        toast('Weather file has no daylight at this hour; using manual illuminance values.', true);
-        dh = num('inEdh');
-        dn = num('inEdn');
-      }
-    }
-    let skyType = val('selSky') as 'auto' | 'clear' | 'overcast';
-    if (skyType === 'auto') skyType = dn > 2000 ? 'clear' : 'overcast';
-    if (sun.altitude <= 0 && skyType === 'clear') skyType = 'overcast';
-    sky = daylightSkyDirections({ sky: skyType, mf, northAngle: north, diffuseHorizontal: dh, directNormal: dn, sun, groundReflectance: groundR, includeGround });
-    const hh = Math.floor(state.hour), mm = Math.round((state.hour % 1) * 60);
-    meta = `${MONTH_NAMES[state.month - 1]} ${state.day} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')} · CIE ${skyType} · Ed ${fmt(dh, 0)} lx${skyType === 'clear' ? ` · En ${fmt(dn, 0)} lx` : ''}`;
-  }
-  let bounce: BounceSettings | undefined;
-  if (bounceMode > 0) {
-    // evaluate hit-point illuminance with the coarse (Tregenza) sky for speed
-    const coarse = mf === 1 ? sky : type === 'daylightFactor'
-      ? daylightSkyDirections({ sky: 'overcast', mf: 1, northAngle: north, diffuseHorizontal: 100, directNormal: 0, groundReflectance: groundR, includeGround })
-      : sky;
-    bounce = {
-      rays: Math.max(8, Math.round(num('inRays') || 48)),
-      reflectance: Math.min(0.95, Math.max(0, num('inRefl'))),
-      multi: bounceMode === 2,
-      dirs: coarse.dirs,
-      weights: coarse.weights,
-    };
-    meta += ` · ${bounceMode === 2 ? 'multi-bounce' : '1 bounce'} ρ=${bounce.reflectance}`;
-  }
-  return { dirs: sky.dirs, weights: sky.weights, mode: 'cosine', scale: 1, meta, bounce };
+function studyContext() {
+  if (!state.weather) throw new Error('Weather data is still loading.');
+  return { weather: state.weather, location: state.location, northAngle: state.northAngle, weatherLabel: state.weatherLabel };
 }
 
 async function run() {
@@ -650,27 +492,19 @@ async function run() {
     toast('Load a model first (try "Load sample site").', true);
     return;
   }
-  const type = val('selType') as StudyType;
+  const settings = readSettings();
+  const type = settings.type;
   let grid: AnalysisGrid, prep: Prepared;
   try {
-    grid = buildGrid(val('selGrid'));
+    grid = buildGrid(settings, viewer.parts);
     if (!grid.areas.length) throw new Error('The sensor grid is empty — check the grid size and the selected surfaces.');
-    prep = prepare(type);
+    prep = prepareStudy(settings, studyContext());
+    if (prep.warning) toast(prep.warning, true);
   } catch (e) {
     toast((e as Error).message, true);
     return;
   }
-  const job: JobData = {
-    sensors: grid.sensors,
-    normals: grid.normals,
-    dirs: prep.dirs,
-    weights: prep.weights,
-    mode: prep.mode,
-    glazingTransmittance: Math.min(1, Math.max(0, num('inTau'))),
-    glazingOpaque: checked('chkGlassOpaque'),
-    offset: Math.max(0, num('inOffset') || 0),
-    bounce: prep.bounce,
-  };
+  const job = makeJob(grid, prep, settings);
   state.running = true;
   $<HTMLButtonElement>('btnRun').disabled = true;
   $('btnCancel').hidden = false;
@@ -680,9 +514,8 @@ async function run() {
   const sensors = grid.areas.length;
   $('runInfo').textContent = `Tracing ${sensors.toLocaleString()} sensors × ${prep.weights.length.toLocaleString()} directions${prep.bounce ? ` (+${prep.bounce.rays} bounce rays)` : ''}…`;
   try {
-    const res = await sim.run(sceneData(), job, (f) => (bar.style.width = `${(f * 100).toFixed(1)}%`));
+    const res = await sim.run(sceneData(viewer.parts), job, (f) => (bar.style.width = `${(f * 100).toFixed(1)}%`));
     const values = res.values;
-    if (prep.scale !== 1) for (let i = 0; i < values.length; i++) values[i] *= prep.scale;
     const st = STUDY[type];
     const rec: ResultRecord = {
       id: (state.results.at(-1)?.id ?? 0) + 1,
@@ -695,11 +528,12 @@ async function run() {
       legend: { palette: st.palette, min: 0, max: 1, segments: 0 },
       threshold: st.threshold,
       lift: Math.min(0.03, Math.max(0.002, (num('inGrid') || 1) * 0.01)),
+      modelVersion: state.modelVersion,
     };
     autoRange(rec);
     state.results.push(rec);
     showResult(rec);
-    if (val('selGrid') === 'workplane') {
+    if (settings.gridKind === 'workplane') {
       // cut away roofs/ceilings so the interior work plane is visible
       let top = -Infinity;
       for (let i = 1; i < grid.sensors.length; i += 3) top = Math.max(top, grid.sensors[i]);
@@ -774,20 +608,18 @@ $('selHistory').onchange = () => {
 };
 
 function stats(r: ResultRecord) {
-  let sumA = 0, sumVA = 0, above = 0, lo = Infinity, hi = -Infinity;
-  for (let i = 0; i < r.values.length; i++) {
-    const v = r.values[i], a = r.grid.areas[i];
-    sumA += a;
-    sumVA += v * a;
-    if (v >= r.threshold) above += a;
-    if (v < lo) lo = v;
-    if (v > hi) hi = v;
-  }
-  return { mean: sumVA / (sumA || 1), area: sumA, above: (above / (sumA || 1)) * 100, min: lo, max: hi };
+  return gridStats(r.values, r.grid.areas, r.threshold);
 }
+
+function renderStale() {
+  const r = state.current;
+  $('staleNote').hidden = !r || r.modelVersion === state.modelVersion;
+}
+$('btnRerun').onclick = () => run();
 
 function renderResultPanel(full = true) {
   const r = state.current;
+  renderStale();
   $('resultsEmpty').hidden = !!r;
   $('resultsBody').hidden = !r;
   $('legendOverlay').hidden = !r;
@@ -880,7 +712,7 @@ $('btnJson').onclick = () => {
 $('btnGlb').onclick = async () => {
   if (!state.current) return;
   try {
-    download(exportName('glb'), await viewer.exportGLB(true), 'model/gltf-binary');
+    download(exportName('glb'), await viewer.exportGLB({ result: true, model: true }), 'model/gltf-binary');
   } catch (e) {
     toast(`GLB export failed: ${(e as Error).message}`, true);
   }
@@ -896,13 +728,39 @@ $('btnShot').onclick = savePng;
 $('btnClimate').onclick = () => {
   const d = $('drawer');
   d.hidden = !d.hidden;
-  if (!d.hidden) refreshClimate();
+  if (!d.hidden) {
+    $('optDrawer').hidden = true;
+    refreshClimate();
+  }
 };
+
+// ---------------------------------------------------------------- optimizer
+function setNorth(v: number) {
+  state.northAngle = v;
+  $<HTMLInputElement>('inNorth').value = String(v);
+  viewer.setSunPathParams(state.location, state.northAngle);
+  updateSun();
+}
+const optimizer = new OptimizerPanel({
+  editor,
+  readSettings,
+  studyContext,
+  getNorth: () => state.northAngle,
+  setNorth,
+  getTau: () => num('inTau'),
+  setTau: (v) => ($<HTMLInputElement>('inTau').value = String(v)),
+  toast,
+  onApplied: () => renderStale(),
+});
 $('btnCloseDrawer').onclick = () => ($('drawer').hidden = true);
 initClimate(() => ({ weather: state.weather, period: readPeriod() }));
 
 // ---------------------------------------------------------------- responsive
 $('btnPanels').onclick = () => $('sidebar').classList.toggle('open');
+document.querySelectorAll<HTMLButtonElement>('[data-proxy]').forEach((b) => (b.onclick = () => {
+  $('sidebar').classList.remove('open');
+  $(b.dataset.proxy!).click();
+}));
 
 // ---------------------------------------------------------------- boot
 writePeriod(state.period);
@@ -913,4 +771,4 @@ loadSample();
 loadPresetWeather('sf');
 
 // expose for automation / debugging
-(window as unknown as { envsim: unknown }).envsim = { state, viewer, run };
+(window as unknown as { envsim: unknown }).envsim = { state, viewer, editor, panel, optimizer, run };

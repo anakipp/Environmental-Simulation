@@ -18,6 +18,7 @@
           </div>
         </div>
         <div class="top-actions">
+          <button id="btnOptimize" class="btn ghost" title="Galapagos-style optimization of model and site parameters">Optimize</button>
           <button id="btnClimate" class="btn ghost" title="Open climate & comfort charts">Climate &amp; comfort</button>
           <button id="btnFit" class="btn ghost" title="Zoom to model">Zoom to fit</button>
           <button id="btnShot" class="btn ghost" title="Save a PNG of the 3D view">Screenshot</button>
@@ -27,6 +28,11 @@
       </header>
 
       <aside class="sidebar" id="sidebar">
+        <div class="mobile-tools">
+          <button class="btn ghost small" data-proxy="btnOptimize">Optimize</button>
+          <button class="btn ghost small" data-proxy="btnClimate">Climate &amp; comfort</button>
+          <button class="btn ghost small" data-proxy="btnShot">Screenshot</button>
+        </div>
         <!-- MODEL -->
         <details class="section" open>
           <summary><span class="num">1</span>Model</summary>
@@ -49,8 +55,15 @@
               <button class="btn" id="btnSample">Load sample site</button>
               <button class="btn ghost" id="btnClear">Clear</button>
             </div>
-            <p class="hint">Assign a role to each layer/mesh. <b>Analysis surface</b> gets a sensor grid, <b>Floor</b> gets a work-plane grid, <b>Glazing</b> transmits light, everything else is opaque context. Click a mesh in 3D to find it.</p>
+            <p class="hint">Assign a role to each layer/mesh. <b>Analysis surface</b> gets a sensor grid, <b>Floor</b> gets a work-plane grid, <b>Glazing</b> transmits light, everything else is opaque context. Click a mesh in 3D to select and edit it.</p>
             <div id="partList" class="parts"></div>
+            <div class="add-row" role="group" aria-label="Add geometry">
+              <button class="btn ghost small" id="btnAddBox" title="Add a massing box (context building, shading block)">+ Box</button>
+              <button class="btn ghost small" id="btnAddRoom" title="Add a parametric room with windows by ratio">+ Room</button>
+              <button class="btn ghost small" id="btnAddShade" title="Add an overhang, fins or louvers to the selected glazing">+ Shading</button>
+              <button class="btn ghost small" id="btnExportModel" title="Save the edited model as GLB">Export model</button>
+            </div>
+            <div id="editPanel" class="edit-panel" hidden></div>
           </div>
         </details>
 
@@ -202,6 +215,10 @@
           <input type="range" id="rngSection" min="0" max="10" step="0.05" value="2.4" aria-label="Section cut height" />
           <output id="outSection"></output>
           <button class="btn ghost small" id="btnFitResult" title="Zoom to the analysis grid">Zoom to result</button>
+          <span class="sep" aria-hidden="true"></span>
+          <button class="btn ghost small" id="btnUndo" title="Undo model edit (Ctrl+Z)" aria-label="Undo">↶ Undo</button>
+          <button class="btn ghost small" id="btnRedo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">↷ Redo</button>
+          <label class="check" title="Snap moves to 0.1 m and rotations to 5°"><input type="checkbox" id="chkSnap" checked /> Snap</label>
         </div>
         <div class="vp-overlay" id="vpEmpty" hidden>
           <p>Load the sample site or upload a model to begin.</p>
@@ -216,6 +233,10 @@
         </div>
         <div id="resultsEmpty" class="empty">Run a simulation to see the results here.</div>
         <div id="resultsBody" hidden>
+          <div class="stale" id="staleNote" role="status" hidden>
+            <span>The model changed after this run, so these results are out of date.</span>
+            <button class="btn small" id="btnRerun">Run again</button>
+          </div>
           <div class="stat-grid" id="stats"></div>
           <h3>Distribution by area</h3>
           <div id="hist"></div>
@@ -260,6 +281,16 @@
         <div class="drawer-body">
           <div class="tab-controls" id="climateControls"></div>
           <div class="tab-content" id="climateContent"></div>
+        </div>
+      </section>
+      <section class="drawer opt-drawer" id="optDrawer" hidden aria-label="Optimizer">
+        <div class="drawer-head">
+          <h2 class="drawer-title">Optimize <span class="hint">evolutionary search over model and site parameters, like Galapagos</span></h2>
+          <button class="btn ghost icon" id="btnCloseOpt" aria-label="Close optimizer">✕</button>
+        </div>
+        <div class="drawer-body opt-body">
+          <div class="tab-controls" id="optControls"></div>
+          <div class="tab-content" id="optContent"></div>
         </div>
       </section>
       <div class="toast" id="toast" role="status" aria-live="polite"></div>

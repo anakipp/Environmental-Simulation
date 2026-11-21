@@ -1,17 +1,24 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { buildSunPath, placeSun } from './sunpath';
 import { Location } from '../core/solar';
 import { Role } from './loaders';
+import type { GenInfo } from '../model/types';
 
 export interface Part {
   id: number;
   name: string;
+  /** A mesh directly under the model root; its geometry is in part-local space. */
   mesh: THREE.Mesh;
   role: Role;
   visible: boolean;
   triangles: number;
+  /** set for parts made by a generator (box, room, shading) */
+  gen?: GenInfo;
+  /** transform at import time, for "Reset" */
+  home?: THREE.Matrix4;
 }
 
 const ROLE_COLORS: Record<Role, number> = {
@@ -43,8 +50,12 @@ export class Viewer {
   showSunPath = true;
   shadowsOn = true;
   onPick: ((hit: { kind: 'result'; face: number; point: THREE.Vector3; clientX: number; clientY: number } | null) => void) | null = null;
-  onSelectPart: ((p: Part) => void) | null = null;
+  onSelectPart: ((p: Part | null) => void) | null = null;
+  /** gizmo drag lifecycle: start (before change), each change, end */
+  onGizmo: ((phase: 'start' | 'change' | 'end') => void) | null = null;
+  readonly gizmo: TransformControls;
   parts: Part[] = [];
+  private nextPartId = 1;
 
   constructor(private container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -66,6 +77,19 @@ export class Viewer {
     this.sunLight.shadow.mapSize.set(2048, 2048);
     this.sunLight.shadow.bias = -0.0004;
     this.sunLight.shadow.normalBias = 0.02;
+
+    this.gizmo = new TransformControls(this.camera, this.renderer.domElement);
+    this.gizmo.setSize(0.9);
+    const gizmoHelper = this.gizmo.getHelper();
+    gizmoHelper.traverse((o) => (o.castShadow = false));
+    this.scene.add(gizmoHelper);
+    this.gizmo.addEventListener('dragging-changed', (e) => {
+      this.controls.enabled = !(e as unknown as { value: boolean }).value;
+    });
+    this.gizmo.addEventListener('mouseDown', () => this.onGizmo?.('start'));
+    this.gizmo.addEventListener('objectChange', () => this.onGizmo?.('change'));
+    this.gizmo.addEventListener('mouseUp', () => this.onGizmo?.('end'));
+    this.gizmo.addEventListener('change', () => this.invalidate());
 
     this.shadowGround = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.ShadowMaterial({ opacity: 0.22 }));
     this.shadowGround.rotation.x = -Math.PI / 2;
@@ -108,7 +132,7 @@ export class Viewer {
   private bindPointer() {
     const el = this.renderer.domElement;
     let down: { x: number; y: number } | null = null;
-    el.addEventListener('pointerdown', (e) => (down = { x: e.clientX, y: e.clientY }));
+    el.addEventListener('pointerdown', (e) => (down = this.gizmo.axis ? null : { x: e.clientX, y: e.clientY }));
     el.addEventListener('pointerup', (e) => {
       if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 4) this.pick(e, true);
       down = null;
@@ -135,26 +159,64 @@ export class Viewer {
       const meshes = this.parts.filter((p) => p.visible).map((p) => p.mesh);
       const hit = this.raycaster.intersectObjects(meshes, false)[0];
       const part = hit && this.parts.find((p) => p.mesh === hit.object);
-      if (part) this.onSelectPart?.(part);
+      this.onSelectPart?.(part || null);
     }
   }
 
   // ---------- model ----------
-  addModel(root: THREE.Object3D, parts: Omit<Part, 'id'>[]) {
-    this.modelRoot.add(root);
+  /** Add a part; its mesh is placed directly under the model root. */
+  addPart(p: Omit<Part, 'id'> & { id?: number }): Part {
+    const part = { ...p, id: p.id ?? this.nextPartId++ } as Part;
+    this.nextPartId = Math.max(this.nextPartId, part.id + 1);
+    this.modelRoot.add(part.mesh);
+    this.parts.push(part);
+    this.styleMesh(part);
+    return part;
+  }
+
+  removePart(part: Part) {
+    if (this.gizmo.object === part.mesh) this.gizmo.detach();
+    this.modelRoot.remove(part.mesh);
+    this.parts = this.parts.filter((q) => q !== part);
+    this.invalidate();
+  }
+
+  /** Replace the part list wholesale (used by undo/redo). */
+  setParts(parts: Part[]) {
+    if (this.gizmo.object && !parts.some((p) => p.mesh === this.gizmo.object)) this.gizmo.detach();
+    this.modelRoot.clear();
+    this.parts = parts;
     for (const p of parts) {
-      const part: Part = { ...p, id: this.parts.length ? Math.max(...this.parts.map((q) => q.id)) + 1 : 1 };
-      this.parts.push(part);
-      this.styleMesh(part);
+      this.modelRoot.add(p.mesh);
+      this.styleMesh(p);
     }
-    this.updateBounds();
+    this.invalidate();
   }
 
   clearModel() {
+    this.gizmo.detach();
     this.modelRoot.clear();
     this.parts = [];
     this.clearResult();
     this.updateBounds();
+  }
+
+  attachGizmo(mesh: THREE.Mesh | null, mode?: 'translate' | 'rotate' | 'scale') {
+    if (mode) this.gizmo.setMode(mode);
+    if (mesh) this.gizmo.attach(mesh);
+    else this.gizmo.detach();
+    // rotation is only useful about the vertical axis for buildings
+    const rot = this.gizmo.mode === 'rotate';
+    this.gizmo.showX = !rot;
+    this.gizmo.showZ = !rot;
+    this.gizmo.showY = true;
+    this.invalidate();
+  }
+
+  setGizmoSnap(on: boolean) {
+    this.gizmo.setTranslationSnap(on ? 0.1 : null);
+    this.gizmo.setRotationSnap(on ? THREE.MathUtils.degToRad(5) : null);
+    this.gizmo.setScaleSnap(on ? 0.05 : null);
   }
 
   // ---------- section cut ----------
@@ -364,11 +426,19 @@ export class Viewer {
     return this.renderer.domElement.toDataURL('image/png');
   }
 
-  async exportGLB(includeModel: boolean): Promise<ArrayBuffer> {
+  async exportGLB(what: { result: boolean; model: boolean }): Promise<ArrayBuffer> {
     const root = new THREE.Group();
-    if (this.resultMesh) root.add(this.resultMesh.clone());
-    if (includeModel) for (const p of this.parts) if (p.mesh.visible) root.add(p.mesh.clone());
+    if (what.result && this.resultMesh) root.add(this.resultMesh.clone());
+    if (what.model) {
+      for (const p of this.parts) {
+        if (!p.mesh.visible) continue;
+        const m = p.mesh.clone();
+        m.name = p.name;
+        root.add(m);
+      }
+    }
     const out = await new GLTFExporter().parseAsync(root, { binary: true });
     return out as ArrayBuffer;
   }
+
 }
